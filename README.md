@@ -39,7 +39,8 @@ fx-volatility-sparse-pca/
 │   ├── sparse_pca.py          # sparse PCA fit + AIC/CAIC/SBC/ICOMP scoring
 │   ├── volatility_models.py   # GARCH/EGARCH/GJR fitting + IC comparison
 │   └── plotting.py            # stem plots, ACF/PACF, forecast plots
-├── tests/test_data_utils.py   # unit tests for the dependency-light parts
+├── tests/                      # test_data_utils.py, test_sparse_pca.py,
+│                               # test_volatility_models.py
 ├── run_analysis.py            # end-to-end driver script
 ├── requirements.txt
 └── LICENSE                    # MIT
@@ -54,8 +55,9 @@ python run_analysis.py --data data/FxData.xlsx --out results/
 ```
 
 This writes information-criteria tables (CSV) and figures (PNG) to
-`results/` (git-ignored — regenerate anytime by rerunning). Runtime is a few
-minutes, mostly spent fitting the GARCH(p, q) grid. After a run, it's worth
+`results/` (git-ignored — regenerate anytime by rerunning). Runtime is well
+under a minute (~10s on a laptop), mostly spent fitting the GARCH(p, q)
+grid. After a run, it's worth
 copying 2-3 of the more interesting figures (e.g. the SPC stem plot and the
 GARCH forecast plot) into a committed `docs/` folder and linking them here so
 the results are visible without cloning the repo.
@@ -66,11 +68,22 @@ the results are visible without cloning the repo.
 python -m unittest discover -v
 ```
 
-Covers `normalize_columns` (centering/unit-norm properties, zero-variance
-column edge case) and `load_fx_data` (shape, column names, numeric sanity)
-against the real dataset — the parts of the pipeline that don't require
-`sklearn`/`arch`, so they run with just numpy/pandas/openpyxl installed. All
-4 pass as of this commit.
+- `test_data_utils.py` — `normalize_columns` (centering/unit-norm properties,
+  zero-variance column edge case) and `load_fx_data` (shape, column names,
+  numeric sanity) against the real dataset. Needs only numpy/pandas/openpyxl.
+- `test_sparse_pca.py` — regression tests for a bug where the sparsity
+  penalty `alpha` was set 1-2 orders of magnitude too high for this
+  correlation-scale-normalized data, collapsing every loading to exactly
+  zero; covers both "the current default doesn't collapse" and "an
+  over-large alpha is now caught with a clear error instead of propagating
+  NaNs downstream." Needs `scikit-learn`.
+- `test_volatility_models.py` — regression tests for a bug where fitting on
+  an internally-rescaled series never scaled the reported log-likelihood /
+  AIC / BIC / parameter covariance back down; checks that AIC/BIC/ICOMP and
+  the fitted `omega` are invariant to the (internal, arbitrary) `scale`
+  value used for optimizer conditioning. Needs `arch`.
+
+All 10 pass as of this commit (`pip install -r requirements.txt` first).
 
 ## What changed from the original
 
@@ -117,15 +130,56 @@ long-panel structure will work as a drop-in replacement.
 
 ## Verification status
 
-The data loading, correlation-scale normalization, and information-criteria
-math (`src/data_utils.py`, `src/sparse_pca.py`'s scoring functions) were
-tested end-to-end against the real 3,202 x 20 FX dataset and produce
-correctly-shaped, finite, sane-magnitude results. The `sklearn`/`arch`
--dependent model-fitting calls were validated for control flow and API usage
-against the documented interfaces, but not executed against live network-
-installed packages in the environment this was built in — run
-`pip install -r requirements.txt && python run_analysis.py` once locally to
-confirm before you rely on the numbers.
+`run_analysis.py` has been executed end-to-end against the real 3,202 x 20 FX
+dataset (not just checked for control flow) and produces finite, sane-looking
+tables and figures throughout. That run surfaced and fixed two real bugs from
+an earlier version of this port that had only been reviewed, not executed:
+
+- **`SPARSITY_ALPHA` was 1.0.** `normalize_columns` scales each column to
+  unit Euclidean *norm* (not unit variance), so entries are ~1/sqrt(n) in
+  magnitude — an L1 penalty of 1.0 is 1-2 orders of magnitude too large and
+  drove every sparse-PCA loading to exactly zero, for every k from 1 to 10.
+  That degenerate all-zero fit didn't crash immediately: it silently
+  produced a meaningless information-criteria table (a `+1e-8*I`
+  regularization fallback masked the singular covariance), NaN "percent
+  variance explained," and only failed loudly once a zero-variance
+  component score hit the GARCH stage (`LinAlgError: Eigenvalues did not
+  converge`). Fixed by lowering the default to 0.06 (chosen empirically —
+  see `fit_sparse_pca`'s docstring) and by having `fit_sparse_pca` raise
+  immediately if any component still collapses to all-zero, rather than
+  letting NaNs propagate.
+- **GARCH log-likelihood/AIC/BIC/parameter-covariance were never unscaled.**
+  `_fit_one`/`grid_search_garch` fit on `r * scale` (`arch`'s recommended fix
+  for its optimizer's sensitivity to small-variance series) but returned
+  `result.aic`/`result.bic`/`result.param_cov` as-is, which are computed on
+  the *scaled* series. Model selection (which family/order wins) was still
+  correct, since the same constant shift applies to every model compared at
+  a fixed scale, but the absolute numbers in the printed tables/CSVs were
+  off by a large, scale-dependent constant, and `omega` was left in the
+  wrong units. Fixed by analytically mapping the log-likelihood and
+  parameter covariance back to `r`'s original units (see
+  `_rescale_transform` in `src/volatility_models.py`); `tests/
+  test_volatility_models.py` regression-tests this by checking the fit is
+  invariant to the (arbitrary, internal) choice of `scale`.
+
+One remaining caveat worth knowing about before you present the k-selection
+result: `select_number_of_components`'s IC values are **not monotonic or
+smooth in k** the way the original write-up's Table 1 is (which itself has a
+clean single minimum). Refitting `sklearn.decomposition.SparsePCA`
+independently at each k means each fit is its own non-convex coordinate-
+descent optimization with no shared warm start, so the criteria can dip and
+recover erratically across k (observed: a sharp, isolated drop at k=5 on
+this dataset). Treat the "best k" output as indicative, not as precise as
+the original inverse-power-method's deflation-based sweep, which updates one
+component at a time from a shared basis.
+
+Also note: this port's GARCH(1,1) fit to SPC1 lands almost exactly on the
+IGARCH boundary (alpha+beta ≈ 1), unlike the original write-up's comfortably
+stationary ~0.997. `omega/(1-alpha-beta)` is undefined there, so
+`run_analysis.py` falls back to the terminal forecast variance instead and
+prints a warning — this is a property of fitting GARCH directly to FX-level
+(not return) scores, not a bug, but it's why the forecast plot's dashed
+"Theoretical" line is a stand-in rather than a true unconditional variance.
 
 ## License
 

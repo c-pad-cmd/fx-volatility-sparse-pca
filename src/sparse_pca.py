@@ -41,18 +41,33 @@ class SparsePCAResult:
     adjusted_variance: np.ndarray  # (k,) non-redundant variance per SPC
 
 
-def fit_sparse_pca(X: np.ndarray, n_components: int, alpha: float = 1.0,
+def fit_sparse_pca(X: np.ndarray, n_components: int, alpha: float = 0.06,
                     random_state: int = 0) -> SparsePCAResult:
     """Fit a k-component sparse PCA model and compute adjusted variance.
 
     ``alpha`` controls the L1 sparsity penalty (higher = sparser loadings),
     playing the same role as the ``card`` (target cardinality) parameter in
-    the original MATLAB call.
+    the original MATLAB call. The default of 0.06 was chosen empirically on
+    this dataset: ``X`` is scaled to unit column *norm* (not unit variance),
+    so entries are ~1/sqrt(n) in magnitude, and a naively "standard-looking"
+    alpha like 1.0 is 1-2 orders of magnitude too large -- it drives every
+    loading to exactly zero (see the ValueError raised below). 0.06 gives
+    ~13-18 nonzero loadings per component, in the neighborhood of the
+    original write-up's target cardinality of 14.
     """
     model = SparsePCA(n_components=n_components, alpha=alpha,
                        random_state=random_state)
     model.fit(X)
     F = model.components_.T  # sklearn returns (k, p); we want (p, k)
+
+    dead = np.where(~F.any(axis=0))[0]
+    if dead.size:
+        raise ValueError(
+            f"alpha={alpha} is too large: component(s) {list(dead + 1)} of "
+            f"{n_components} collapsed to all-zero loadings. Lower alpha "
+            "and retry."
+        )
+
     scores = X @ F
     adj_var = adjusted_variance(scores)
     return SparsePCAResult(n_components, F, scores, adj_var)
@@ -116,7 +131,7 @@ def information_criteria(X: np.ndarray, F: np.ndarray,
     return {"AIC": aic, "CAIC": caic, "SBC": sbc, "ICOMP": icomp}
 
 
-def select_number_of_components(X: np.ndarray, k_max: int, alpha: float = 1.0,
+def select_number_of_components(X: np.ndarray, k_max: int, alpha: float = 0.06,
                                  random_state: int = 0) -> pd.DataFrame:
     """Score k = 1..k_max sparse PCA fits and return an IC comparison table."""
     rows = []

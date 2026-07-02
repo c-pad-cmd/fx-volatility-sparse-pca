@@ -22,11 +22,12 @@ from src.data_utils import load_fx_data, normalize_columns
 from src.sparse_pca import (fit_sparse_pca, information_criteria,
                              select_number_of_components)
 from src.volatility_models import (best_by_criterion, compare_garch_family,
-                                    grid_search_garch)
+                                    fit_garch, grid_search_garch)
 from src.plotting import acf_pacf_plots, forecast_plot, stem_plots
 
 N_COMPONENTS = 3          # number of SPCs carried forward, per the write-up
-SPARSITY_ALPHA = 1.0      # L1 penalty for sklearn's SparsePCA
+SPARSITY_ALPHA = 0.06     # L1 penalty for sklearn's SparsePCA -- see the
+                          # docstring of fit_sparse_pca for why this isn't 1.0
 NUM_LAGS = 19
 P_MAX = Q_MAX = 4
 
@@ -88,24 +89,32 @@ def main(data_path: Path, out_dir: Path) -> None:
     print(f"\nBest GARCH(p,q) by AIC: p={int(best_aic.p)}, q={int(best_aic.q)}")
 
     # ---- 3(b): forecast with the best-fitting GARCH model ----
-    from arch import arch_model
-
     p_best, q_best = int(best_aic.p), int(best_aic.q)
     scale = 100.0
-    model = arch_model(r1 * scale, mean="Zero", vol="Garch", p=p_best, q=q_best)
-    fit = model.fit(disp="off")
-    print(fit.summary())
+    best_fit = fit_garch(r1, p_best, q_best, scale=scale)
+    print(f"\nBest-fitting GARCH({p_best},{q_best}) parameters (original scale):")
+    print(best_fit.params)
 
     horizon = 200
-    fc = fit.forecast(horizon=horizon, reindex=False)
+    fc = best_fit.result.forecast(horizon=horizon, reindex=False)
     forecast_variance = fc.variance.values[-1] / (scale ** 2)
 
-    omega = fit.params["omega"]
-    alpha_sum = sum(v for k, v in fit.params.items() if k.startswith("alpha"))
-    beta_sum = sum(v for k, v in fit.params.items() if k.startswith("beta"))
-    theoretical_variance = (omega / (scale ** 2)) / (1 - alpha_sum - beta_sum)
+    omega = best_fit.params["omega"]
+    alpha_sum = sum(v for k, v in best_fit.params.items() if k.startswith("alpha"))
+    beta_sum = sum(v for k, v in best_fit.params.items() if k.startswith("beta"))
+    persistence = alpha_sum + beta_sum
+    if persistence >= 1 - 1e-6:
+        # Fitted at/past the IGARCH boundary: omega/(1-persistence) is
+        # undefined/explosive. Fall back to the terminal forecast value
+        # rather than plotting a nonsensical scale.
+        print(f"Warning: GARCH persistence alpha+beta={persistence:.6f} is at/above "
+              "the stationarity boundary; unconditional variance is undefined. "
+              "Using the terminal forecast variance as a stand-in.")
+        theoretical_variance = forecast_variance[-1]
+    else:
+        theoretical_variance = omega / (1 - persistence)
 
-    sim = model.simulate(fit.params, nobs=20)
+    sim = best_fit.result.model.simulate(best_fit.result.params, nobs=20)
     simulated_returns = sim["data"].to_numpy() / scale
 
     forecast_plot(simulated_returns, forecast_variance, theoretical_variance,
