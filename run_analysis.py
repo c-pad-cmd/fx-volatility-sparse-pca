@@ -23,7 +23,9 @@ from src.sparse_pca import (fit_sparse_pca, information_criteria,
                              select_number_of_components)
 from src.volatility_models import (best_by_criterion, compare_garch_family,
                                     fit_garch, grid_search_garch)
-from src.plotting import acf_pacf_plots, forecast_plot, stem_plots
+from src.plotting import (acf_pacf_plots, forecast_plot, garch_family_bars,
+                           garch_grid_heatmap, ic_vs_k_plot, loadings_biplot,
+                           stem_plots)
 
 N_COMPONENTS = 3          # number of SPCs carried forward, per the write-up
 SPARSITY_ALPHA = 0.06     # L1 penalty for sklearn's SparsePCA -- see the
@@ -52,10 +54,13 @@ def main(data_path: Path, out_dir: Path) -> None:
 
     best_k = {crit: int(ic_table[crit].idxmin()) for crit in ic_table.columns}
     print(f"\nBest k by criterion: {best_k}")
+    ic_vs_k_plot(ic_table, fig_dir / "ic_vs_k.png")
 
     # ---- 1(b): fit the chosen model, stem-plot the loadings ----
     result = fit_sparse_pca(X, N_COMPONENTS, alpha=SPARSITY_ALPHA)
     stem_plots(result.loadings, currency_labels, fig_dir)
+    loadings_biplot(result.loadings, currency_labels,
+                     fig_dir / "spc1_spc2_biplot.png")
 
     explained_pct = 100 * result.adjusted_variance / result.adjusted_variance.sum()
     print(f"\nPercent adjusted variance explained by first {N_COMPONENTS} SPCs:")
@@ -77,6 +82,7 @@ def main(data_path: Path, out_dir: Path) -> None:
         for crit in ("AIC", "BIC", "ICOMP"):
             best_model = table[crit].idxmin()
             print(f"  Best by {crit}: {best_model}")
+    garch_family_bars(all_garch_tables, fig_dir / "garch_family_comparison.png")
 
     # ---- 3(a): GARCH(p,q) grid search on SPC1 (largest explained variance) ----
     r1 = pd.Series(result.scores[:, 0])
@@ -84,6 +90,7 @@ def main(data_path: Path, out_dir: Path) -> None:
     grid.to_csv(out_dir / "spc1_garch_grid_search.csv", index=False)
     print("\nGARCH(p, q) grid search on SPC1:")
     print(grid.round(2))
+    garch_grid_heatmap(grid, fig_dir / "spc1_garch_grid_heatmap.png")
 
     best_aic = best_by_criterion(grid, "AIC")
     print(f"\nBest GARCH(p,q) by AIC: p={int(best_aic.p)}, q={int(best_aic.q)}")
