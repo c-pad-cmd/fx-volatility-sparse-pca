@@ -1,5 +1,7 @@
 # FX Sparse PCA + GARCH Volatility Modeling
 
+> New here? [Plain-English overview](OVERVIEW.md) explains what this does and why, without the stats jargon.
+
 Dimension reduction and conditional-volatility modeling for a panel of 20
 foreign-exchange rates, using sparse PCA to compress correlated currencies
 into a few interpretable components and a GARCH-family model comparison to
